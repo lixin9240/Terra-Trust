@@ -7,7 +7,6 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
-use Tymon\JWTAuth\Facades\JWTAuth;
 
 class AuthController extends Controller
 {
@@ -25,35 +24,43 @@ class AuthController extends Controller
     public function register(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
-            'name'     => 'required|string|max:255',
-            'email'    => 'required|string|email|max:255|unique:users',
-            'password' => 'required|string|min:6|confirmed',
+            'username'  => 'required|string|min:5|max:20|unique:users,username',
+            'password'  => 'required|string|min:6|max:20',
+            'phone'     => 'required|string|unique:users,phone',
+            'real_name' => 'nullable|string|max:50',
+            'gender'    => 'nullable|integer|in:0,1,2',
+            'age'       => 'nullable|integer|min:1|max:200',
         ]);
 
         if ($validator->fails()) {
             return response()->json([
-                'status'  => 'error',
-                'message' => 'Validation failed',
-                'errors'  => $validator->errors(),
-            ], 422);
+                'code' => 400,
+                'msg'  => $validator->errors()->first(),
+                'data' => null,
+            ]);
         }
 
         $user = User::create([
-            'name'     => $request->name,
-            'email'    => $request->email,
-            'password' => Hash::make($request->password),
+            'username'  => $request->username,
+            'password'  => Hash::make($request->password),
+            'phone'     => $request->phone,
+            'real_name' => $request->real_name,
+            'gender'    => $request->gender ?? 0,
+            'age'       => $request->age,
+            'status'    => 1,
         ]);
 
-        $token = JWTAuth::fromUser($user);
+        $token = auth('api')->login($user);
 
         return response()->json([
-            'status'  => 'success',
-            'message' => 'User registered successfully',
-            'data'    => [
-                'user'  => $user,
-                'token' => $token,
+            'code' => 200,
+            'msg'  => '注册成功',
+            'data' => [
+                'user_id'  => $user->id,
+                'username' => $user->username,
+                'token'    => $token,
             ],
-        ], 201);
+        ]);
     }
 
     /**
@@ -62,28 +69,65 @@ class AuthController extends Controller
     public function login(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
-            'email'    => 'required|string|email',
-            'password' => 'required|string|min:6',
+            'username' => 'required|string',
+            'password' => 'required|string',
         ]);
 
         if ($validator->fails()) {
             return response()->json([
-                'status'  => 'error',
-                'message' => 'Validation failed',
-                'errors'  => $validator->errors(),
-            ], 422);
+                'code' => 400,
+                'msg'  => $validator->errors()->first(),
+                'data' => null,
+            ]);
         }
 
-        $credentials = $request->only('email', 'password');
+        // 先尝试用户名登录
+        $token = auth('api')->attempt([
+            'username' => $request->username,
+            'password' => $request->password,
+        ]);
 
-        if (! $token = auth('api')->attempt($credentials)) {
+        // 再尝试手机号登录
+        if (! $token) {
+            $token = auth('api')->attempt([
+                'phone'    => $request->username,
+                'password' => $request->password,
+            ]);
+        }
+
+        if (! $token) {
             return response()->json([
-                'status'  => 'error',
-                'message' => 'Unauthorized — invalid credentials',
-            ], 401);
+                'code' => 400,
+                'msg'  => '用户名或密码错误',
+                'data' => null,
+            ]);
         }
 
-        return $this->respondWithToken($token);
+        /** @var \App\Models\User $user */
+        $user = auth('api')->user();
+
+        if ($user->status !== 1) {
+            auth('api')->logout();
+
+            return response()->json([
+                'code' => 400,
+                'msg'  => '账号已被禁用',
+                'data' => null,
+            ]);
+        }
+
+        $user->update(['last_login_time' => now()]);
+
+        return response()->json([
+            'code' => 200,
+            'msg'  => '登录成功',
+            'data' => [
+                'user_id'   => $user->id,
+                'username'  => $user->username,
+                'token'     => $token,
+                'expire_at' => now()->addMinutes(config('jwt.ttl'))->format('Y-m-d\TH:i:s'),
+            ],
+        ]);
     }
 
     /**
@@ -91,9 +135,21 @@ class AuthController extends Controller
      */
     public function me(): JsonResponse
     {
+        $user = auth('api')->user();
+
         return response()->json([
-            'status' => 'success',
-            'data'   => auth('api')->user(),
+            'code' => 200,
+            'msg'  => '成功',
+            'data' => [
+                'user_id'   => $user->id,
+                'username'  => $user->username,
+                'real_name' => $user->real_name,
+                'phone'     => $user->phone,
+                'gender'    => $user->gender,
+                'age'       => $user->age,
+                'avatar'    => $user->avatar,
+                'status'    => $user->status,
+            ],
         ]);
     }
 
@@ -105,8 +161,8 @@ class AuthController extends Controller
         auth('api')->logout();
 
         return response()->json([
-            'status'  => 'success',
-            'message' => 'Successfully logged out',
+            'code' => 200,
+            'msg'  => '退出成功',
         ]);
     }
 
@@ -115,20 +171,16 @@ class AuthController extends Controller
      */
     public function refresh(): JsonResponse
     {
-        return $this->respondWithToken(auth('api')->refresh());
-    }
+        /** @var \Tymon\JWTAuth\JWTGuard $guard */
+        $guard = auth('api');
+        $token = $guard->refresh();
 
-    /**
-     * Get the token array structure.
-     */
-    protected function respondWithToken(string $token): JsonResponse
-    {
         return response()->json([
-            'status' => 'success',
-            'data'   => [
-                'access_token' => $token,
-                'token_type'   => 'bearer',
-                'expires_in'   => auth('api')->factory()->getTTL() * 60,
+            'code' => 200,
+            'msg'  => '刷新成功',
+            'data' => [
+                'token'     => $token,
+                'expire_at' => now()->addMinutes(config('jwt.ttl'))->format('Y-m-d\TH:i:s'),
             ],
         ]);
     }

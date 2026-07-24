@@ -2,6 +2,7 @@
 
 namespace App\Exceptions;
 
+use App\Exceptions\BusinessException;
 use Illuminate\Foundation\Exceptions\Handler as ExceptionHandler;
 use Throwable;
 
@@ -25,6 +26,14 @@ class Handler extends ExceptionHandler
     {
         $this->reportable(function (Throwable $e) {
             //
+        });
+
+        $this->renderable(function (BusinessException $e) {
+            return response()->json([
+                'code' => $e->getCode() ?: 400,
+                'msg'  => $e->getMessage(),
+                'data' => null,
+            ], 200);
         });
     }
 }

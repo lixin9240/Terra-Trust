@@ -4,6 +4,7 @@ namespace App\Services\LX;
 
 use App\Exceptions\BusinessException;
 use App\Models\User;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
 
@@ -21,6 +22,9 @@ class AuthService
             'status'   => 1,
         ]);
 
+        // 注册后自动登录，生成 token
+        $token = auth('api')->login($user);
+
         Log::channel('business')->info('用户注册成功', [
             'user_id'  => $user->id,
             'username' => $user->username,
@@ -29,6 +33,7 @@ class AuthService
         return [
             'user_id'  => $user->id,
             'username' => $user->username,
+            'token'    => $token,
         ];
     }
 
@@ -51,6 +56,7 @@ class AuthService
             throw new BusinessException('用户名或密码错误');
         }
 
+        /** @var \App\Models\User $user */
         $user = auth('api')->user();
 
         if ($user->status !== 1) {
@@ -89,5 +95,89 @@ class AuthService
             'avatar'    => $user->avatar,
             'status'    => $user->status,
         ];
+    }
+
+    /**
+     * 修改登录密码
+     */
+    public function changePassword(User $user, string $oldPassword, string $newPassword): void
+    {
+        if (!Hash::check($oldPassword, $user->password)) {
+            throw new BusinessException('原密码错误');
+        }
+
+        $user->update(['password' => Hash::make($newPassword)]);
+
+        // 修改密码后强制退出，需要重新登录
+        auth('api')->logout();
+
+        Log::channel('business')->info('用户修改密码成功', [
+            'user_id' => $user->id,
+        ]);
+    }
+
+    /**
+     * 刷新Token
+     */
+    public function refreshToken(): array
+    {
+        /** @var \Tymon\JWTAuth\JWTGuard $guard */
+        $guard = auth('api');
+        $token = $guard->refresh();
+
+        return [
+            'token'     => $token,
+            'expire_at' => now()->addMinutes(config('jwt.ttl'))->format('Y-m-d\TH:i:s'),
+        ];
+    }
+
+    /**
+     * 发送短信验证码
+     */
+    public function sendCode(string $phone): void
+    {
+        // 生成6位随机验证码
+        $code = sprintf('%06d', random_int(0, 999999));
+
+        // 存储到缓存，5分钟有效
+        $cacheKey = 'sms_code:' . $phone;
+        Cache::put($cacheKey, $code, now()->addMinutes(5));
+
+        // TODO: 接入真实短信服务商，目前仅记录日志
+        Log::channel('business')->info('短信验证码已生成', [
+            'phone' => $phone,
+            'code'  => $code,
+        ]);
+    }
+
+    /**
+     * 验证码重置密码
+     */
+    public function resetPassword(string $phone, string $code, string $newPassword): void
+    {
+        // 校验验证码
+        $cacheKey = 'sms_code:' . $phone;
+        $cachedCode = Cache::get($cacheKey);
+
+        if (!$cachedCode || $cachedCode !== $code) {
+            throw new BusinessException('验证码错误或已过期');
+        }
+
+        // 查找用户
+        $user = User::where('phone', $phone)->first();
+        if (!$user) {
+            throw new BusinessException('该手机号未注册');
+        }
+
+        // 更新密码
+        $user->update(['password' => Hash::make($newPassword)]);
+
+        // 删除已使用的验证码
+        Cache::forget($cacheKey);
+
+        Log::channel('business')->info('用户通过验证码重置密码成功', [
+            'user_id' => $user->id,
+            'phone'   => $phone,
+        ]);
     }
 }
